@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FB Ads Library Scraper · Auto-scroll 30+ Pages</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    body { font-family: 'Inter', system-ui, sans-serif; }
+    .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    .gradient-bg {
+      background:
+        radial-gradient(ellipse at top left, rgba(99,102,241,0.18), transparent 50%),
+        radial-gradient(ellipse at bottom right, rgba(236,72,153,0.15), transparent 50%),
+        #0a0a0f;
+    }
+    .glass {
+      background: rgba(255,255,255,0.04);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+    .glow {
+      box-shadow: 0 0 40px rgba(99,102,241,0.35);
+    }
+    pre::-webkit-scrollbar { width: 8px; height: 8px; }
+    pre::-webkit-scrollbar-track { background: #111; }
+    pre::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+    pre::-webkit-scrollbar-thumb:hover { background: #555; }
+    .spinner {
+      border: 3px solid rgba(255,255,255,0.1);
+      border-top-color: #818cf8;
+      border-radius: 50%;
+      width: 20px; height: 20px;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body class="gradient-bg min-h-screen text-slate-100 antialiased">
+
+  <!-- Top nav -->
+  <header class="border-b border-white/5">
+    <div class="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-indigo-500 to-fuchsia-500 flex items-center justify-center font-bold text-white">F</div>
+        <div>
+          <div class="font-bold text-white tracking-tight">FB Ads Library Scraper</div>
+          <div class="text-xs text-slate-400">Paste link · auto-scroll · screenshot + JSON + HTML</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-2 text-xs text-slate-400">
+        <span class="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+        <span>Live</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-6xl mx-auto px-6 py-10 space-y-8">
+
+    <!-- Hero / Form card -->
+    <section class="glass rounded-2xl p-8 glow">
+      <h1 class="text-3xl md:text-4xl font-extrabold tracking-tight bg-gradient-to-r from-white via-indigo-200 to-fuchsia-200 bg-clip-text text-transparent">
+        Paste any Facebook Ads Library link
+      </h1>
+      <p class="text-slate-400 mt-2 text-sm md:text-base">
+        We auto-scroll up to 100 pages, screenshot the full result, and give you HTML, JSON, and PNG.
+      </p>
+
+      <form id="scrape-form" class="mt-6 space-y-5">
+        <div>
+          <label class="text-xs font-semibold uppercase tracking-wider text-slate-400">Ads Library URL</label>
+          <input
+            id="url"
+            name="url"
+            type="url"
+            required
+            class="mono mt-2 w-full rounded-lg bg-black/40 border border-white/10 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 outline-none px-4 py-3 text-sm text-slate-100 placeholder-slate-500"
+            placeholder="https://web.facebook.com/ads/library/?active_status=active&ad_type=all&country=US&q=..."
+            value="https://web.facebook.com/ads/library/?active_status=active&ad_type=all&country=US&is_targeted_country=false&media_type=all&q=women%20fashion&search_type=keyword_unordered&sort_data[mode]=total_impressions&sort_data[direction]=desc"
+          />
+        </div>
+
+        <div>
+          <div class="flex items-baseline justify-between">
+            <label class="text-xs font-semibold uppercase tracking-wider text-slate-400">Pages to auto-scroll</label>
+            <span id="pages-label" class="text-sm font-bold text-indigo-300">30</span>
+          </div>
+          <input
+            id="pages"
+            name="pages"
+            type="range"
+            min="5" max="100" step="5" value="30"
+            class="mt-2 w-full accent-indigo-500"
+          />
+          <div class="flex justify-between text-[10px] text-slate-500 mt-1">
+            <span>5</span><span>25</span><span>50</span><span>75</span><span>100</span>
+          </div>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-3 pt-2">
+          <button
+            id="submit-btn"
+            type="submit"
+            class="inline-flex items-center gap-2 rounded-lg bg-gradient-to-r from-indigo-500 to-fuchsia-500 hover:from-indigo-400 hover:to-fuchsia-400 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/30 transition"
+          >
+            <span>🚀</span>
+            <span>Start Scraping</span>
+          </button>
+          <div id="status-pill" class="hidden text-xs px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-slate-300"></div>
+        </div>
+      </form>
+    </section>
+
+    <!-- Progress + logs -->
+    <section id="progress-section" class="hidden glass rounded-2xl p-6 space-y-4">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="spinner"></div>
+          <div>
+            <div class="font-semibold text-white">Working on it…</div>
+            <div id="progress-text" class="text-xs text-slate-400">Starting…</div>
+          </div>
+        </div>
+        <div id="job-id-display" class="mono text-xs text-slate-500"></div>
+      </div>
+      <div class="w-full h-2 bg-white/5 rounded-full overflow-hidden">
+        <div id="progress-bar" class="h-full bg-gradient-to-r from-indigo-500 to-fuchsia-500 transition-all duration-300" style="width:0%"></div>
+      </div>
+      <pre id="log-box" class="mono text-[11px] leading-snug bg-black/60 border border-white/10 rounded-lg p-4 h-72 overflow-auto text-emerald-300"></pre>
+    </section>
+
+    <!-- Results -->
+    <section id="results-section" class="hidden glass rounded-2xl p-6 space-y-4">
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 rounded-full bg-emerald-500/20 text-emerald-300 flex items-center justify-center">✓</div>
+        <div>
+          <div class="font-bold text-white text-lg">Done!</div>
+          <div class="text-xs text-slate-400">Your files are ready to download.</div>
+        </div>
+      </div>
+      <div id="files" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"></div>
+    </section>
+
+    <footer class="text-center text-xs text-slate-500 pt-8">
+      Built with Flask · Playwright · Tailwind · Inter
+    </footer>
+  </main>
+
+  <script>
+    const DEFAULT_URL = "https://web.facebook.com/ads/library/?active_status=active&ad_type=all&country=US&is_targeted_country=false&media_type=all&q=women%20fashion&search_type=keyword_unordered&sort_data[mode]=total_impressions&sort_data[direction]=desc";
+
+    const form = document.getElementById('scrape-form');
+    const urlInput = document.getElementById('url');
+    const pagesInput = document.getElementById('pages');
+    const pagesLabel = document.getElementById('pages-label');
+    const submitBtn = document.getElementById('submit-btn');
+    const statusPill = document.getElementById('status-pill');
+    const progressSection = document.getElementById('progress-section');
+    const progressBar = document.getElementById('progress-bar');
+    const progressText = document.getElementById('progress-text');
+    const logBox = document.getElementById('log-box');
+    const jobIdDisplay = document.getElementById('job-id-display');
+    const resultsSection = document.getElementById('results-section');
+    const filesEl = document.getElementById('files');
+
+    pagesInput.addEventListener('input', () => pagesLabel.textContent = pagesInput.value);
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const url = urlInput.value.trim();
+      const pages = parseInt(pagesInput.value, 10);
+      if (!url) return;
+
+      submitBtn.disabled = true;
+      submitBtn.classList.add('opacity-50', 'cursor-not-allowed');
+      statusPill.classList.remove('hidden');
+      statusPill.textContent = 'Starting job…';
+      progressSection.classList.remove('hidden');
+      resultsSection.classList.add('hidden');
+      progressBar.style.width = '5%';
+      progressText.textContent = 'Submitting…';
+      logBox.textContent = '';
+      filesEl.innerHTML = '';
+
+      try {
+        const res = await fetch('/api/scrape', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, pages }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          statusPill.textContent = 'Error';
+          progressText.textContent = data.error || 'Failed to start';
+          submitBtn.disabled = false;
+          submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+          return;
+        }
+        const jobId = data.job_id;
+        jobIdDisplay.textContent = `job: ${jobId}`;
+        statusPill.textContent = 'Running';
+        pollJob(jobId, pages);
+      } catch (err) {
+        statusPill.textContent = 'Error';
+        progressText.textContent = err.message;
+        submitBtn.disabled = false;
+        submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+      }
+    });
+
+    function renderLog(logs) {
+      if (!Array.isArray(logs)) return;
+      logBox.textContent = logs.join('\n');
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function prettyFile(name) {
+      if (name.endsWith('.png')) return { label: 'Full-page Screenshot', icon: '🖼️', kind: 'image' };
+      if (name.endsWith('.html')) return { label: 'Full HTML', icon: '📄', kind: 'html' };
+      if (name.endsWith('.json')) return { label: 'Extracted JSON', icon: '🧾', kind: 'json' };
+      if (name.endsWith('.txt')) return { label: 'Run log', icon: '📜', kind: 'log' };
+      return { label: name, icon: '📦', kind: 'other' };
+    }
+
+    function renderFiles(jobId, files) {
+      if (!files || !files.length) {
+        filesEl.innerHTML = '<div class="text-slate-500 text-sm col-span-full">No files yet…</div>';
+        return;
+      }
+      filesEl.innerHTML = files.map(name => {
+        const meta = prettyFile(name);
+        return `
+          <a href="/api/download/${jobId}/${name}" class="group flex items-center gap-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 hover:border-indigo-400/40 px-4 py-3 transition">
+            <div class="text-2xl">${meta.icon}</div>
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-semibold text-white truncate">${meta.label}</div>
+              <div class="text-[11px] text-slate-400 mono truncate">${name}</div>
+            </div>
+            <div class="text-indigo-300 text-sm group-hover:translate-x-1 transition">↓</div>
+          </a>
+        `;
+      }).join('');
+    }
+
+    function pollJob(jobId, targetPages) {
+      let elapsed = 0;
+      const ticker = setInterval(() => {
+        elapsed += 1;
+        const pct = Math.min(95, (elapsed / (targetPages * 4)) * 100);
+        progressBar.style.width = pct + '%';
+      }, 1000);
+
+      const interval = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/job/${jobId}`);
+          const data = await res.json();
+          if (data.error) {
+            clearInterval(interval);
+            clearInterval(ticker);
+            progressText.textContent = data.error;
+            return;
+          }
+          renderLog(data.logs || []);
+          if (data.last_log) progressText.textContent = data.last_log;
+          if (data.files) renderFiles(jobId, data.files);
+
+          if (data.status === 'completed' || data.status === 'failed') {
+            clearInterval(interval);
+            clearInterval(ticker);
+            progressBar.style.width = '100%';
+            statusPill.textContent = data.status === 'completed' ? 'Completed' : 'Failed';
+            statusPill.classList.toggle('bg-emerald-500/10', data.status === 'completed');
+            statusPill.classList.toggle('border-emerald-400/30', data.status === 'completed');
+            if (data.status === 'completed') {
+              resultsSection.classList.remove('hidden');
+              renderFiles(jobId, data.files || []);
+            } else {
+              progressText.textContent = data.error || 'Job failed';
+            }
+            submitBtn.disabled = false;
+            submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+          }
+        } catch (err) {
+          console.error(err);
+        }
+      }, 1500);
+    }
+  </script>
+</body>
+</html>

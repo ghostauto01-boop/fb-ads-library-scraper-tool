@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: fb-ads-scraper
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
