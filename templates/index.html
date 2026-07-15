@@ -49,6 +49,8 @@
       animation: spin 0.8s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .pulse-dot { animation: pulse 1.5s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
   </style>
 </head>
 <body class="gradient-bg min-h-screen text-slate-100 antialiased">
@@ -64,8 +66,8 @@
         </div>
       </div>
       <div class="flex items-center gap-2 text-xs text-slate-400">
-        <span class="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-        <span>Live</span>
+        <span id="sse-dot" class="inline-block w-2 h-2 rounded-full bg-slate-500"></span>
+        <span id="sse-text">Idle</span>
       </div>
     </div>
   </header>
@@ -80,6 +82,15 @@
       <p class="text-slate-400 mt-2 text-sm md:text-base">
         We auto-scroll up to 100 pages, capture a <strong class="text-slate-200">2× DPI (2880px wide)</strong> screenshot, and give you HTML, JSON, and PNG.
       </p>
+
+      <div class="mt-5 rounded-lg border border-amber-400/20 bg-amber-500/5 p-3 text-xs text-amber-200/80 flex items-start gap-2">
+        <span class="text-amber-300 mt-0.5">⚠️</span>
+        <div>
+          <strong class="text-amber-200">Free-tier note:</strong>
+          This app is hosted on Render's free plan, so server state is wiped when the instance sleeps (after ~15 min idle).
+          <strong class="text-amber-200">Keep this tab open until your files are downloaded</strong> — they will be lost if the server sleeps or restarts.
+        </div>
+      </div>
 
       <form id="scrape-form" class="mt-6 space-y-5">
         <div>
@@ -156,18 +167,24 @@
 
     <!-- Results -->
     <section id="results-section" class="hidden glass rounded-2xl p-6 space-y-4">
-      <div class="flex items-center gap-3">
-        <div class="w-8 h-8 rounded-full bg-emerald-500/20 text-emerald-300 flex items-center justify-center">✓</div>
-        <div>
-          <div class="font-bold text-white text-lg">Done!</div>
-          <div id="results-summary" class="text-xs text-slate-400">Your files are ready to download.</div>
+      <div class="flex items-center justify-between gap-3 flex-wrap">
+        <div class="flex items-center gap-3">
+          <div class="w-8 h-8 rounded-full bg-emerald-500/20 text-emerald-300 flex items-center justify-center">✓</div>
+          <div>
+            <div class="font-bold text-white text-lg">Done!</div>
+            <div id="results-summary" class="text-xs text-slate-400">Your files are ready to download.</div>
+          </div>
         </div>
+        <a id="download-all" href="#"
+           class="inline-flex items-center gap-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-semibold px-4 py-2 text-sm transition">
+          ⬇ Download all (ZIP)
+        </a>
       </div>
       <div id="files" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"></div>
     </section>
 
     <footer class="text-center text-xs text-slate-500 pt-8">
-      Built with Flask · Playwright · Tailwind · Inter
+      Built with Flask · Playwright · Tailwind · Inter · Server-Sent Events
     </footer>
   </main>
 
@@ -188,15 +205,13 @@
     const statPages = document.getElementById('stat-pages');
     const statCards = document.getElementById('stat-cards');
     const resultsSummary = document.getElementById('results-summary');
+    const downloadAll = document.getElementById('download-all');
+    const sseDot = document.getElementById('sse-dot');
+    const sseText = document.getElementById('sse-text');
 
-    let pollInterval = null;
-    let progressTicker = null;
     let activeJobId = null;
-    let elapsedSec = 0;
+    let activeEventSource = null;
     let targetPagesForJob = 30;
-    let lastJobFromStorage = null;
-    let isResume = false;
-    try { lastJobFromStorage = localStorage.getItem('fbads:lastJobId'); } catch {}
 
     pagesInput.addEventListener('input', () => pagesLabel.textContent = pagesInput.value);
 
@@ -213,33 +228,40 @@
       statusPill.textContent = text;
     }
 
-    function clearPolling() {
-      if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
-      if (progressTicker) { clearInterval(progressTicker); progressTicker = null; }
+    function setSseStatus(state) {
+      sseDot.classList.remove('bg-slate-500', 'bg-emerald-400', 'bg-rose-400', 'bg-amber-400');
+      sseText.classList.remove('text-slate-400', 'text-emerald-300', 'text-rose-300', 'text-amber-300');
+      if (state === 'live') {
+        sseDot.classList.add('bg-emerald-400', 'pulse-dot');
+        sseText.classList.add('text-emerald-300');
+        sseText.textContent = 'Live';
+      } else if (state === 'err') {
+        sseDot.classList.add('bg-rose-400');
+        sseText.classList.add('text-rose-300');
+        sseText.textContent = 'Disconnected';
+      } else if (state === 'busy') {
+        sseDot.classList.add('bg-amber-400', 'pulse-dot');
+        sseText.classList.add('text-amber-300');
+        sseText.textContent = 'Working';
+      } else {
+        sseDot.classList.add('bg-slate-500');
+        sseText.classList.add('text-slate-400');
+        sseText.textContent = 'Idle';
+      }
+    }
+
+    function clearEventSource() {
+      if (activeEventSource) {
+        try { activeEventSource.close(); } catch {}
+        activeEventSource = null;
+      }
     }
 
     function setUIIdle() {
-      clearPolling();
+      clearEventSource();
       submitBtn.disabled = false;
       submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
       activeJobId = null;
-      try { localStorage.removeItem('fbads:lastJobId'); } catch {}
-    }
-
-    function startProgressTicker(targetPages) {
-      if (progressTicker) clearInterval(progressTicker);
-      elapsedSec = 0;
-      // Real progress will overwrite this whenever the server reports pages_loaded.
-      // The ticker is just a fallback so the bar doesn't sit at 0% if the server
-      // is slow to report the first update.
-      progressTicker = setInterval(() => {
-        elapsedSec += 1;
-        // Don't move the bar past 10% with just the ticker — wait for real data
-        const cur = parseFloat(progressBar.style.width || '0');
-        if (cur < 10) {
-          progressBar.style.width = Math.min(10, cur + 1) + '%';
-        }
-      }, 1500);
     }
 
     function renderLog(logs) {
@@ -249,7 +271,7 @@
     }
 
     function prettyFile(name) {
-      if (name.endsWith('.png')) return { label: 'Full-page Screenshot (high-DPI)', icon: '🖼️' };
+      if (name.endsWith('.png')) return { label: 'Full-page Screenshot (2× DPI)', icon: '🖼️' };
       if (name.endsWith('.html')) return { label: 'Full HTML', icon: '📄' };
       if (name.endsWith('.json')) return { label: 'Extracted JSON', icon: '🧾' };
       if (name.endsWith('.txt')) return { label: 'Run log', icon: '📜' };
@@ -278,86 +300,92 @@
     }
 
     function updateProgressStats(data) {
-      // Real progress from the server
       if (typeof data.pages_loaded === 'number') {
         const target = targetPagesForJob || 30;
         statPages.textContent = `${data.pages_loaded} / ${target}`;
         const pct = Math.min(100, (data.pages_loaded / target) * 100);
-        if (pct > parseFloat(progressBar.style.width || '0') || pct === 100) {
-          progressBar.style.width = pct + '%';
-        }
+        const cur = parseFloat(progressBar.style.width || '0');
+        if (pct > cur || pct === 100) progressBar.style.width = pct + '%';
       }
       if (typeof data.total_cards === 'number') {
         statCards.textContent = data.total_cards.toLocaleString();
       }
     }
 
-    async function handleJobData(jobId, data) {
-      if (data.error) {
-        clearPolling();
-        progressBar.style.width = '0%';
-        setPill('Lost on server', 'err');
-        progressText.textContent =
-          'The server no longer has a record of this job. The scraper may have been killed, or the free Render instance was restarted (cold start). The job ID and any partial files are gone. Click "Start Scraping" again to retry.';
-        logBox.textContent =
-          (logBox.textContent ? logBox.textContent + '\n' : '') +
-          '[server] ' + (data.error || 'Job not found');
-        setUIIdle();
-        return;
-      }
+    function startStream(jobId) {
+      clearEventSource();
+      const es = new EventSource(`/api/stream/${jobId}`);
+      activeEventSource = es;
+      setSseStatus('busy');
 
-      renderLog(data.logs || []);
-      if (data.last_log) progressText.textContent = data.last_log;
-      if (data.files) renderFiles(jobId, data.files);
-      updateProgressStats(data);
+      es.addEventListener('hello', (ev) => {
+        setSseStatus('live');
+        try { const d = JSON.parse(ev.data); if (d.status) setPill(d.status === 'queued' ? 'Queued' : 'Running', ''); } catch {}
+      });
 
-      if (data.status === 'completed') {
-        clearPolling();
-        progressBar.style.width = '100%';
-        setPill('Completed', 'ok');
-        progressText.textContent = 'Done! Files are ready below.';
-        const cards = data.total_cards != null ? data.total_cards.toLocaleString() : '?';
-        const pages = data.pages_loaded != null ? data.pages_loaded : '?';
-        resultsSummary.textContent = `Loaded ${pages} page-equivalents · ${cards} cards extracted · screenshot is 2× DPI.`;
-        resultsSection.classList.remove('hidden');
-        renderFiles(jobId, data.files || []);
-        setUIIdle();
-      } else if (data.status === 'failed') {
-        clearPolling();
-        progressBar.style.width = '100%';
-        setPill('Failed', 'err');
-        progressText.textContent = data.error || 'Job failed on the server';
-        setUIIdle();
-      } else if (data.status === 'queued') {
-        setPill('Queued', '');
-        progressText.textContent = 'Waiting for worker…';
-      } else {
-        setPill('Running', '');
-      }
-    }
-
-    async function pollJob(jobId, targetPages, resume) {
-      activeJobId = jobId;
-      targetPagesForJob = targetPages;
-      try { localStorage.setItem('fbads:lastJobId', jobId); } catch {}
-      jobIdDisplay.textContent = `job: ${jobId}`;
-      setPill(resume ? 'Resuming' : 'Running', '');
-      statPages.textContent = `0 / ${targetPages}`;
-      statCards.textContent = '0';
-      if (!resume) startProgressTicker(targetPages);
-
-      const tick = async () => {
-        if (activeJobId !== jobId) return;
+      es.addEventListener('snapshot', (ev) => {
         try {
-          const res = await fetch(`/api/job/${jobId}`);
-          const data = await res.json();
-          await handleJobData(jobId, data);
-        } catch (err) {
-          console.error('poll error', err);
+          const d = JSON.parse(ev.data);
+          renderLog(d.logs || []);
+          if (d.last_log) progressText.textContent = d.last_log;
+          if (d.files) renderFiles(jobId, d.files);
+          updateProgressStats(d);
+        } catch (e) { console.error(e); }
+      });
+
+      es.addEventListener('log', (ev) => {
+        try {
+          const d = JSON.parse(ev.data);
+          if (d.message) {
+            const lines = logBox.textContent ? logBox.textContent.split('\n') : [];
+            lines.push(d.message);
+            logBox.textContent = lines.slice(-200).join('\n');
+            logBox.scrollTop = logBox.scrollHeight;
+            progressText.textContent = d.message;
+          }
+        } catch (e) { console.error(e); }
+      });
+
+      es.addEventListener('done', (ev) => {
+        try {
+          const d = JSON.parse(ev.data);
+          if (d.status === 'completed') {
+            clearEventSource();
+            setSseStatus('idle');
+            progressBar.style.width = '100%';
+            setPill('Completed', 'ok');
+            progressText.textContent = 'Done! Files are ready below.';
+            const cards = (d.total_cards != null) ? d.total_cards.toLocaleString() : '?';
+            const pages = (d.pages_loaded != null) ? d.pages_loaded : '?';
+            resultsSummary.textContent = `Loaded ${pages} page-equivalents · ${cards} cards extracted · screenshot is 2× DPI.`;
+            resultsSection.classList.remove('hidden');
+            renderFiles(jobId, d.files || []);
+            downloadAll.href = `/api/download-all/${jobId}`;
+            downloadAll.setAttribute('download', `fb-ads-${jobId}.zip`);
+            setUIIdle();
+          } else if (d.status === 'failed') {
+            clearEventSource();
+            setSseStatus('err');
+            progressBar.style.width = '100%';
+            setPill('Failed', 'err');
+            progressText.textContent = d.error || 'Job failed on the server';
+            setUIIdle();
+          }
+        } catch (e) { console.error(e); }
+      });
+
+      es.onerror = () => {
+        // The browser auto-reconnects EventSource on errors. We don't want
+        // that here — the server has already finished or the connection
+        // is dead. Just close it.
+        clearEventSource();
+        setSseStatus('err');
+        if (statusPill.textContent !== 'Completed' && statusPill.textContent !== 'Failed') {
+          setPill('Disconnected', 'err');
+          progressText.textContent = 'Lost connection to the server. The free Render plan may have put the instance to sleep. Start a new scrape.';
+          setUIIdle();
         }
       };
-      tick();
-      pollInterval = setInterval(tick, 1500);
     }
 
     form.addEventListener('submit', async (e) => {
@@ -366,7 +394,6 @@
       const pages = parseInt(pagesInput.value, 10);
       if (!url) return;
 
-      clearPolling();
       submitBtn.disabled = true;
       submitBtn.classList.add('opacity-50', 'cursor-not-allowed');
       progressSection.classList.remove('hidden');
@@ -376,7 +403,10 @@
       logBox.textContent = '';
       filesEl.innerHTML = '';
       jobIdDisplay.textContent = '';
+      statPages.textContent = `0 / ${pages}`;
+      statCards.textContent = '0';
       setPill('Starting job…', '');
+      setSseStatus('busy');
 
       try {
         const res = await fetch('/api/scrape', {
@@ -388,25 +418,24 @@
         if (!res.ok) {
           setPill('Error', 'err');
           progressText.textContent = data.error || 'Failed to start';
+          setSseStatus('err');
           setUIIdle();
           return;
         }
-        pollJob(data.job_id, pages, false);
+        targetPagesForJob = pages;
+        activeJobId = data.job_id;
+        jobIdDisplay.textContent = `job: ${data.job_id}`;
+        startStream(data.job_id);
       } catch (err) {
         setPill('Error', 'err');
         progressText.textContent = 'Network error: ' + err.message;
+        setSseStatus('err');
         setUIIdle();
       }
     });
 
-    // If we have a job id in localStorage, try to resume polling its result
-    if (lastJobFromStorage) {
-      progressSection.classList.remove('hidden');
-      resultsSection.classList.add('hidden');
-      setPill('Resuming…', '');
-      progressText.textContent = 'Checking the server for the previous job…';
-      pollJob(lastJobFromStorage, 30, true);
-    }
+    // Initial state
+    setSseStatus('idle');
   </script>
 </body>
 </html>

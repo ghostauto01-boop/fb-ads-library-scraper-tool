@@ -5,9 +5,7 @@ services:
     plan: free
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
-    # Render free tier: keep the disk so finished jobs persist between restarts.
-    # Disk is 1GB and survives instance restarts (only wiped on manual destroy).
-    disk:
-      name: outputs
-      mountPath: /app/static/outputs
-      sizeGB: 1
+    # No disk: the Render free plan doesn't support persistent disks.
+    # The app is designed to work without one — see README for details.
+    # Files written to /app/static/outputs/ live only for the duration of
+    # the request that wrote them. Download them in the same session.
