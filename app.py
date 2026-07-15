@@ -197,7 +197,11 @@ def api_scrape():
 
 @app.route("/api/stream/<job_id>")
 def api_stream(job_id: str):
-    """Server-Sent Events stream of progress for a job."""
+    """Server-Sent Events stream of progress for a job.
+
+    Heartbeat every 2 seconds so the connection survives Render's idle
+    proxy timeouts during long operations like the full-page screenshot.
+    """
     if not _SAFE.match(job_id):
         return jsonify({"error": "Invalid job id"}), 400
     with _jobs_lock:
@@ -219,11 +223,12 @@ def api_stream(job_id: str):
             "total_cards": rec.get("total_cards", 0),
         }
         yield f"event: snapshot\ndata: {json.dumps(snap)}\n\n"
+        # Heartbeat every 2s so the proxy doesn't kill the connection
         while True:
             try:
-                evt = rec["events"].get(timeout=10.0)
+                evt = rec["events"].get(timeout=2.0)
             except queue.Empty:
-                yield ": keepalive\n\n"
+                yield ": ping\n\n"
                 continue
             yield f"event: {evt.get('type', 'message')}\ndata: {json.dumps(evt)}\n\n"
             if evt.get("type") == "done":

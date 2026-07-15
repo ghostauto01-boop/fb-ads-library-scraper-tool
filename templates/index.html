@@ -212,6 +212,8 @@
     let activeJobId = null;
     let activeEventSource = null;
     let targetPagesForJob = 30;
+    let fallbackPollTimer = null;
+    let sseAlive = false;
 
     pagesInput.addEventListener('input', () => pagesLabel.textContent = pagesInput.value);
 
@@ -235,6 +237,10 @@
         sseDot.classList.add('bg-emerald-400', 'pulse-dot');
         sseText.classList.add('text-emerald-300');
         sseText.textContent = 'Live';
+      } else if (state === 'fallback') {
+        sseDot.classList.add('bg-amber-400', 'pulse-dot');
+        sseText.classList.add('text-amber-300');
+        sseText.textContent = 'Polling';
       } else if (state === 'err') {
         sseDot.classList.add('bg-rose-400');
         sseText.classList.add('text-rose-300');
@@ -242,7 +248,7 @@
       } else if (state === 'busy') {
         sseDot.classList.add('bg-amber-400', 'pulse-dot');
         sseText.classList.add('text-amber-300');
-        sseText.textContent = 'Working';
+        sseText.textContent = 'Connecting';
       } else {
         sseDot.classList.add('bg-slate-500');
         sseText.classList.add('text-slate-400');
@@ -257,8 +263,16 @@
       }
     }
 
+    function clearFallbackPoll() {
+      if (fallbackPollTimer) {
+        clearInterval(fallbackPollTimer);
+        fallbackPollTimer = null;
+      }
+    }
+
     function setUIIdle() {
       clearEventSource();
+      clearFallbackPoll();
       submitBtn.disabled = false;
       submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
       activeJobId = null;
@@ -268,6 +282,14 @@
       if (!Array.isArray(logs)) return;
       logBox.textContent = logs.join('\n');
       logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function appendLogLine(line) {
+      const lines = logBox.textContent ? logBox.textContent.split('\n') : [];
+      lines.push(line);
+      logBox.textContent = lines.slice(-200).join('\n');
+      logBox.scrollTop = logBox.scrollHeight;
+      progressText.textContent = line;
     }
 
     function prettyFile(name) {
@@ -312,15 +334,72 @@
       }
     }
 
+    function applyJobDone(jobId, d) {
+      clearFallbackPoll();
+      clearEventSource();
+      if (d.status === 'completed') {
+        setSseStatus('idle');
+        progressBar.style.width = '100%';
+        setPill('Completed', 'ok');
+        progressText.textContent = 'Done! Files are ready below.';
+        const cards = (d.total_cards != null) ? d.total_cards.toLocaleString() : '?';
+        const pages = (d.pages_loaded != null) ? d.pages_loaded : '?';
+        resultsSummary.textContent = `Loaded ${pages} page-equivalents · ${cards} cards extracted · screenshot is 2× DPI.`;
+        resultsSection.classList.remove('hidden');
+        renderFiles(jobId, d.files || []);
+        downloadAll.href = `/api/download-all/${jobId}`;
+        downloadAll.setAttribute('download', `fb-ads-${jobId}.zip`);
+        setUIIdle();
+      } else if (d.status === 'failed') {
+        setSseStatus('err');
+        progressBar.style.width = '100%';
+        setPill('Failed', 'err');
+        progressText.textContent = d.error || 'Job failed on the server';
+        setUIIdle();
+      }
+    }
+
+    // Polling fallback: used when SSE drops. Keeps updating the UI from
+    // the in-memory job state on the server.
+    function startFallbackPoll(jobId) {
+      clearFallbackPoll();
+      setSseStatus('fallback');
+      fallbackPollTimer = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/job/${jobId}`);
+          const d = await res.json();
+          if (d && d.error) {
+            clearFallbackPoll();
+            setSseStatus('err');
+            setPill('Disconnected', 'err');
+            progressText.textContent = d.error;
+            setUIIdle();
+            return;
+          }
+          if (d && Array.isArray(d.logs)) renderLog(d.logs);
+          if (d && d.last_log) progressText.textContent = d.last_log;
+          if (d && d.files) renderFiles(jobId, d.files);
+          if (d) updateProgressStats(d);
+          if (d && (d.status === 'completed' || d.status === 'failed')) {
+            applyJobDone(jobId, d);
+          }
+        } catch (err) {
+          // Network blip — keep trying
+        }
+      }, 2000);
+    }
+
     function startStream(jobId) {
       clearEventSource();
+      clearFallbackPoll();
       const es = new EventSource(`/api/stream/${jobId}`);
       activeEventSource = es;
       setSseStatus('busy');
+      sseAlive = false;
 
-      es.addEventListener('hello', (ev) => {
+      es.addEventListener('hello', () => {
+        sseAlive = true;
         setSseStatus('live');
-        try { const d = JSON.parse(ev.data); if (d.status) setPill(d.status === 'queued' ? 'Queued' : 'Running', ''); } catch {}
       });
 
       es.addEventListener('snapshot', (ev) => {
@@ -336,54 +415,31 @@
       es.addEventListener('log', (ev) => {
         try {
           const d = JSON.parse(ev.data);
-          if (d.message) {
-            const lines = logBox.textContent ? logBox.textContent.split('\n') : [];
-            lines.push(d.message);
-            logBox.textContent = lines.slice(-200).join('\n');
-            logBox.scrollTop = logBox.scrollHeight;
-            progressText.textContent = d.message;
-          }
+          if (d.message) appendLogLine(d.message);
         } catch (e) { console.error(e); }
       });
 
       es.addEventListener('done', (ev) => {
         try {
           const d = JSON.parse(ev.data);
-          if (d.status === 'completed') {
-            clearEventSource();
-            setSseStatus('idle');
-            progressBar.style.width = '100%';
-            setPill('Completed', 'ok');
-            progressText.textContent = 'Done! Files are ready below.';
-            const cards = (d.total_cards != null) ? d.total_cards.toLocaleString() : '?';
-            const pages = (d.pages_loaded != null) ? d.pages_loaded : '?';
-            resultsSummary.textContent = `Loaded ${pages} page-equivalents · ${cards} cards extracted · screenshot is 2× DPI.`;
-            resultsSection.classList.remove('hidden');
-            renderFiles(jobId, d.files || []);
-            downloadAll.href = `/api/download-all/${jobId}`;
-            downloadAll.setAttribute('download', `fb-ads-${jobId}.zip`);
-            setUIIdle();
-          } else if (d.status === 'failed') {
-            clearEventSource();
-            setSseStatus('err');
-            progressBar.style.width = '100%';
-            setPill('Failed', 'err');
-            progressText.textContent = d.error || 'Job failed on the server';
-            setUIIdle();
-          }
+          applyJobDone(jobId, d);
         } catch (e) { console.error(e); }
       });
 
+      // Don't auto-close on transient errors. The EventSource spec says
+      // the browser will auto-reconnect on its own; if the server is
+      // simply slow (e.g. during the long screenshot), we just want
+      // the connection to recover. After ~3s of "readyState !== OPEN"
+      // we drop to polling /api/job as a fallback.
       es.onerror = () => {
-        // The browser auto-reconnects EventSource on errors. We don't want
-        // that here — the server has already finished or the connection
-        // is dead. Just close it.
-        clearEventSource();
-        setSseStatus('err');
-        if (statusPill.textContent !== 'Completed' && statusPill.textContent !== 'Failed') {
-          setPill('Disconnected', 'err');
-          progressText.textContent = 'Lost connection to the server. The free Render plan may have put the instance to sleep. Start a new scrape.';
-          setUIIdle();
+        if (es.readyState === EventSource.CLOSED) {
+          // Server explicitly closed the stream. Use polling as fallback.
+          try { activeEventSource && activeEventSource.close(); } catch {}
+          activeEventSource = null;
+          startFallbackPoll(jobId);
+        } else {
+          // CONNECTING — let the browser auto-reconnect; just note it
+          if (!sseAlive) setSseStatus('busy');
         }
       };
     }

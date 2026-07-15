@@ -57,13 +57,22 @@ class FakePage:
         pass  # no real sleep in tests
 
     def locator(self, sel):
+        # The new scraper scopes load-more clicks to the ads-library main
+        # area. The fake page emulates that structure: a single
+        # [role='main'] element containing all the cards AND the load-more
+        # button, so the scoped selectors work.
         return FakeLocator(self, sel)
 
     def content(self):
         h = "<html><body>"
+        h += "<div role='main'>"
         for c in self.cards:
             h += f"<div data-testid='ad-library-card'>{c['text']}</div>"
-        return h + "</body></html>"
+        # Render a load-more button inside the main area
+        if self.batches_left > 0:
+            h += "<div role='button'>See more</div>"
+        h += "</div></body></html>"
+        return h
 
     def screenshot(self, **kw):
         pass
@@ -78,10 +87,18 @@ class FakeLocator:
         self.sel = sel
 
     def count(self):
+        # Scope to [role='main'] for load-more; cards work anywhere.
         if "ad-library-card" in self.sel:
             return len(self.page.cards)
         if any(s in self.sel for s in ["Load more", "See more", "Show more"]):
-            return 1 if self.page.batches_left > 0 else 0
+            # Only return positive if the selector includes a main-area scope
+            # AND we still have a load-more button to click
+            if ("[role='main']" in self.sel or "[data-pagelet=" in self.sel):
+                return 1 if self.page.batches_left > 0 else 0
+            return 0
+        # The main-area wrapper itself
+        if "[role='main']" in self.sel or "[data-pagelet" in self.sel:
+            return 1
         return 0
 
     def nth(self, i):
@@ -94,6 +111,7 @@ class FakeLocator:
         return self.page.cards[-1]["text"] if self.page.cards else ""
 
     def click(self, timeout=None):
+        # If this locator is a scoped load-more click and there's budget, click it
         if self.page.batches_left <= 0:
             return False
         self.page.batches_left -= 1
@@ -101,6 +119,9 @@ class FakeLocator:
         for j in range(12):
             self.page.cards.append({"text": f"new {n + j}"})
         return True
+
+    def scroll_into_view_if_needed(self, timeout=None):
+        pass
 
 
 # --- Helpers: skip network/wait calls in tests
@@ -130,7 +151,7 @@ def run_loop(page, target_pages=30, max_iter=200):
             stall = 0
         else:
             stall += 1
-            if stall >= 4:
+            if stall >= scraper.STALL_LIMIT:
                 break
     return page_advances, i, len(page.cards)
 
@@ -162,8 +183,8 @@ page = FakePage(total_batches=0)
 adv, it, n = run_loop(page, target_pages=30)
 assert adv == 0, f"expected 0, got {adv}"
 assert n == 12, f"expected 12, got {n}"
-assert it <= 4, f"expected quick exit, got {it} iters"
-ok(f"0 batches → 0 advances, exits in {it} iters")
+assert it <= scraper.STALL_LIMIT, f"expected exit by stall limit, got {it} iters"
+ok(f"0 batches → 0 advances, exits in {it} iters (stall limit {scraper.STALL_LIMIT})")
 
 # D: 1 batch
 page = FakePage(total_batches=1)
