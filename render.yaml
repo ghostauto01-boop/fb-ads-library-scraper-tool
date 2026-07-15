@@ -5,3 +5,9 @@ services:
     plan: free
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
+    # Render free tier: keep the disk so finished jobs persist between restarts.
+    # Disk is 1GB and survives instance restarts (only wiped on manual destroy).
+    disk:
+      name: outputs
+      mountPath: /app/static/outputs
+      sizeGB: 1

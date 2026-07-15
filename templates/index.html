@@ -178,50 +178,50 @@
     const resultsSection = document.getElementById('results-section');
     const filesEl = document.getElementById('files');
 
+    let pollInterval = null;
+    let progressTicker = null;
+    let activeJobId = null;
+    let elapsedSec = 0;
+    let lastJobFromStorage = null;
+    try { lastJobFromStorage = localStorage.getItem('fbads:lastJobId'); } catch {}
+
     pagesInput.addEventListener('input', () => pagesLabel.textContent = pagesInput.value);
 
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const url = urlInput.value.trim();
-      const pages = parseInt(pagesInput.value, 10);
-      if (!url) return;
-
-      submitBtn.disabled = true;
-      submitBtn.classList.add('opacity-50', 'cursor-not-allowed');
-      statusPill.classList.remove('hidden');
-      statusPill.textContent = 'Starting job…';
-      progressSection.classList.remove('hidden');
-      resultsSection.classList.add('hidden');
-      progressBar.style.width = '5%';
-      progressText.textContent = 'Submitting…';
-      logBox.textContent = '';
-      filesEl.innerHTML = '';
-
-      try {
-        const res = await fetch('/api/scrape', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, pages }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          statusPill.textContent = 'Error';
-          progressText.textContent = data.error || 'Failed to start';
-          submitBtn.disabled = false;
-          submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
-          return;
-        }
-        const jobId = data.job_id;
-        jobIdDisplay.textContent = `job: ${jobId}`;
-        statusPill.textContent = 'Running';
-        pollJob(jobId, pages);
-      } catch (err) {
-        statusPill.textContent = 'Error';
-        progressText.textContent = err.message;
-        submitBtn.disabled = false;
-        submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+    function setPill(text, kind) {
+      statusPill.classList.remove('hidden', 'bg-emerald-500/10', 'border-emerald-400/30', 'bg-rose-500/10', 'border-rose-400/30', 'bg-white/5');
+      statusPill.classList.add('border');
+      if (kind === 'ok') {
+        statusPill.classList.add('bg-emerald-500/10', 'border-emerald-400/30');
+      } else if (kind === 'err') {
+        statusPill.classList.add('bg-rose-500/10', 'border-rose-400/30');
+      } else {
+        statusPill.classList.add('bg-white/5', 'border-white/10');
       }
-    });
+      statusPill.textContent = text;
+    }
+
+    function clearPolling() {
+      if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+      if (progressTicker) { clearInterval(progressTicker); progressTicker = null; }
+    }
+
+    function setUIIdle() {
+      clearPolling();
+      submitBtn.disabled = false;
+      submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+      activeJobId = null;
+      try { localStorage.removeItem('fbads:lastJobId'); } catch {}
+    }
+
+    function startProgressTicker(targetPages) {
+      if (progressTicker) clearInterval(progressTicker);
+      elapsedSec = 0;
+      progressTicker = setInterval(() => {
+        elapsedSec += 1;
+        const pct = Math.min(95, (elapsedSec / Math.max(targetPages * 4, 10)) * 100);
+        progressBar.style.width = pct + '%';
+      }, 1000);
+    }
 
     function renderLog(logs) {
       if (!Array.isArray(logs)) return;
@@ -230,11 +230,11 @@
     }
 
     function prettyFile(name) {
-      if (name.endsWith('.png')) return { label: 'Full-page Screenshot', icon: '🖼️', kind: 'image' };
-      if (name.endsWith('.html')) return { label: 'Full HTML', icon: '📄', kind: 'html' };
-      if (name.endsWith('.json')) return { label: 'Extracted JSON', icon: '🧾', kind: 'json' };
-      if (name.endsWith('.txt')) return { label: 'Run log', icon: '📜', kind: 'log' };
-      return { label: name, icon: '📦', kind: 'other' };
+      if (name.endsWith('.png')) return { label: 'Full-page Screenshot', icon: '🖼️' };
+      if (name.endsWith('.html')) return { label: 'Full HTML', icon: '📄' };
+      if (name.endsWith('.json')) return { label: 'Extracted JSON', icon: '🧾' };
+      if (name.endsWith('.txt')) return { label: 'Run log', icon: '📜' };
+      return { label: name, icon: '📦' };
     }
 
     function renderFiles(jobId, files) {
@@ -244,8 +244,9 @@
       }
       filesEl.innerHTML = files.map(name => {
         const meta = prettyFile(name);
+        const safeName = encodeURIComponent(name);
         return `
-          <a href="/api/download/${jobId}/${name}" class="group flex items-center gap-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 hover:border-indigo-400/40 px-4 py-3 transition">
+          <a href="/api/download/${jobId}/${safeName}" class="group flex items-center gap-3 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 hover:border-indigo-400/40 px-4 py-3 transition">
             <div class="text-2xl">${meta.icon}</div>
             <div class="flex-1 min-w-0">
               <div class="text-sm font-semibold text-white truncate">${meta.label}</div>
@@ -257,48 +258,120 @@
       }).join('');
     }
 
-    function pollJob(jobId, targetPages) {
-      let elapsed = 0;
-      const ticker = setInterval(() => {
-        elapsed += 1;
-        const pct = Math.min(95, (elapsed / (targetPages * 4)) * 100);
-        progressBar.style.width = pct + '%';
-      }, 1000);
+    async function handleJobData(jobId, data) {
+      if (data.error) {
+        // Server doesn't know about this job. Most likely cause: cold restart
+        // on the free Render tier wiped the in-memory state, or the worker
+        // died before finishing. Show this clearly and let the user retry.
+        clearPolling();
+        progressBar.style.width = '0%';
+        setPill('Lost on server', 'err');
+        progressText.textContent =
+          'The server no longer has a record of this job. The scraper may have been killed, or the free Render instance was restarted (cold start). The job ID and any partial files are gone. Click "Start Scraping" again to retry.';
+        logBox.textContent =
+          (logBox.textContent ? logBox.textContent + '\n' : '') +
+          '[server] ' + (data.error || 'Job not found');
+        setUIIdle();
+        return;
+      }
 
-      const interval = setInterval(async () => {
+      renderLog(data.logs || []);
+      if (data.last_log) progressText.textContent = data.last_log;
+      if (data.files) renderFiles(jobId, data.files);
+
+      if (data.status === 'completed') {
+        clearPolling();
+        progressBar.style.width = '100%';
+        setPill('Completed', 'ok');
+        progressText.textContent = 'Done! Files are ready below.';
+        resultsSection.classList.remove('hidden');
+        renderFiles(jobId, data.files || []);
+        setUIIdle();
+      } else if (data.status === 'failed') {
+        clearPolling();
+        progressBar.style.width = '100%';
+        setPill('Failed', 'err');
+        progressText.textContent = data.error || 'Job failed on the server';
+        setUIIdle();
+      } else if (data.status === 'queued') {
+        setPill('Queued', '');
+        progressText.textContent = 'Waiting for worker…';
+      } else {
+        setPill('Running', '');
+      }
+    }
+
+    async function pollJob(jobId, targetPages) {
+      activeJobId = jobId;
+      try { localStorage.setItem('fbads:lastJobId', jobId); } catch {}
+      jobIdDisplay.textContent = `job: ${jobId}`;
+      setPill('Running', '');
+      startProgressTicker(targetPages);
+
+      const tick = async () => {
+        if (activeJobId !== jobId) return; // a newer job took over
         try {
           const res = await fetch(`/api/job/${jobId}`);
           const data = await res.json();
-          if (data.error) {
-            clearInterval(interval);
-            clearInterval(ticker);
-            progressText.textContent = data.error;
-            return;
-          }
-          renderLog(data.logs || []);
-          if (data.last_log) progressText.textContent = data.last_log;
-          if (data.files) renderFiles(jobId, data.files);
-
-          if (data.status === 'completed' || data.status === 'failed') {
-            clearInterval(interval);
-            clearInterval(ticker);
-            progressBar.style.width = '100%';
-            statusPill.textContent = data.status === 'completed' ? 'Completed' : 'Failed';
-            statusPill.classList.toggle('bg-emerald-500/10', data.status === 'completed');
-            statusPill.classList.toggle('border-emerald-400/30', data.status === 'completed');
-            if (data.status === 'completed') {
-              resultsSection.classList.remove('hidden');
-              renderFiles(jobId, data.files || []);
-            } else {
-              progressText.textContent = data.error || 'Job failed';
-            }
-            submitBtn.disabled = false;
-            submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
-          }
+          await handleJobData(jobId, data);
         } catch (err) {
-          console.error(err);
+          console.error('poll error', err);
         }
-      }, 1500);
+      };
+      // Immediate first poll
+      tick();
+      pollInterval = setInterval(tick, 1500);
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const url = urlInput.value.trim();
+      const pages = parseInt(pagesInput.value, 10);
+      if (!url) return;
+
+      clearPolling();
+      submitBtn.disabled = true;
+      submitBtn.classList.add('opacity-50', 'cursor-not-allowed');
+      progressSection.classList.remove('hidden');
+      resultsSection.classList.add('hidden');
+      progressBar.style.width = '5%';
+      progressText.textContent = 'Submitting…';
+      logBox.textContent = '';
+      filesEl.innerHTML = '';
+      jobIdDisplay.textContent = '';
+      setPill('Starting job…', '');
+
+      try {
+        const res = await fetch('/api/scrape', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, pages }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setPill('Error', 'err');
+          progressText.textContent = data.error || 'Failed to start';
+          setUIIdle();
+          return;
+        }
+        pollJob(data.job_id, pages);
+      } catch (err) {
+        setPill('Error', 'err');
+        progressText.textContent = 'Network error: ' + err.message;
+        setUIIdle();
+      }
+    });
+
+    // If we have a job id in localStorage, try to resume polling its result
+    if (lastJobFromStorage) {
+      progressSection.classList.remove('hidden');
+      resultsSection.classList.add('hidden');
+      setPill('Resuming…', '');
+      progressText.textContent = 'Checking the server for the previous job…';
+      // Start a poll loop that will self-terminate on terminal state
+      pollJob(lastJobFromStorage, 30);
+      // Override the ticker so the bar doesn't slide on resume
+      if (progressTicker) { clearInterval(progressTicker); progressTicker = null; }
     }
   </script>
 </body>
