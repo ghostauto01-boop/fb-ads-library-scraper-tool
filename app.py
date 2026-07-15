@@ -70,10 +70,15 @@ def run_job(job_id, url, pages):
     )
     try:
         result = scrape_ads_library(url, pages, job_id=job_id, log_callback=log_cb)
+        # Mirror the scraper's final result into the in-memory state so the
+        # UI can show real progress numbers as soon as the job finishes.
         _set_status(
             job_id,
             status=result.get("status", "completed"),
             files=result.get("files", []),
+            pages_loaded=result.get("pages_loaded", 0),
+            iterations=result.get("iterations", 0),
+            total_cards=result.get("total_cards", 0),
             finished_at=int(time.time()),
         )
     except Exception as e:

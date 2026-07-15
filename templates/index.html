@@ -60,7 +60,7 @@
         <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-indigo-500 to-fuchsia-500 flex items-center justify-center font-bold text-white">F</div>
         <div>
           <div class="font-bold text-white tracking-tight">FB Ads Library Scraper</div>
-          <div class="text-xs text-slate-400">Paste link · auto-scroll · screenshot + JSON + HTML</div>
+          <div class="text-xs text-slate-400">Paste link · auto-scroll · high-DPI screenshot + JSON + HTML</div>
         </div>
       </div>
       <div class="flex items-center gap-2 text-xs text-slate-400">
@@ -78,7 +78,7 @@
         Paste any Facebook Ads Library link
       </h1>
       <p class="text-slate-400 mt-2 text-sm md:text-base">
-        We auto-scroll up to 100 pages, screenshot the full result, and give you HTML, JSON, and PNG.
+        We auto-scroll up to 100 pages, capture a <strong class="text-slate-200">2× DPI (2880px wide)</strong> screenshot, and give you HTML, JSON, and PNG.
       </p>
 
       <form id="scrape-form" class="mt-6 space-y-5">
@@ -128,7 +128,7 @@
 
     <!-- Progress + logs -->
     <section id="progress-section" class="hidden glass rounded-2xl p-6 space-y-4">
-      <div class="flex items-center justify-between">
+      <div class="flex items-center justify-between gap-3 flex-wrap">
         <div class="flex items-center gap-3">
           <div class="spinner"></div>
           <div>
@@ -136,7 +136,17 @@
             <div id="progress-text" class="text-xs text-slate-400">Starting…</div>
           </div>
         </div>
-        <div id="job-id-display" class="mono text-xs text-slate-500"></div>
+        <div class="flex items-center gap-4 text-xs">
+          <div class="flex flex-col items-end">
+            <div class="text-slate-500 uppercase tracking-wider text-[10px]">Pages loaded</div>
+            <div id="stat-pages" class="mono text-indigo-300 font-bold text-base">0 / 30</div>
+          </div>
+          <div class="flex flex-col items-end">
+            <div class="text-slate-500 uppercase tracking-wider text-[10px]">Cards</div>
+            <div id="stat-cards" class="mono text-fuchsia-300 font-bold text-base">0</div>
+          </div>
+          <div id="job-id-display" class="mono text-xs text-slate-500"></div>
+        </div>
       </div>
       <div class="w-full h-2 bg-white/5 rounded-full overflow-hidden">
         <div id="progress-bar" class="h-full bg-gradient-to-r from-indigo-500 to-fuchsia-500 transition-all duration-300" style="width:0%"></div>
@@ -150,7 +160,7 @@
         <div class="w-8 h-8 rounded-full bg-emerald-500/20 text-emerald-300 flex items-center justify-center">✓</div>
         <div>
           <div class="font-bold text-white text-lg">Done!</div>
-          <div class="text-xs text-slate-400">Your files are ready to download.</div>
+          <div id="results-summary" class="text-xs text-slate-400">Your files are ready to download.</div>
         </div>
       </div>
       <div id="files" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3"></div>
@@ -162,8 +172,6 @@
   </main>
 
   <script>
-    const DEFAULT_URL = "https://web.facebook.com/ads/library/?active_status=active&ad_type=all&country=US&is_targeted_country=false&media_type=all&q=women%20fashion&search_type=keyword_unordered&sort_data[mode]=total_impressions&sort_data[direction]=desc";
-
     const form = document.getElementById('scrape-form');
     const urlInput = document.getElementById('url');
     const pagesInput = document.getElementById('pages');
@@ -177,12 +185,17 @@
     const jobIdDisplay = document.getElementById('job-id-display');
     const resultsSection = document.getElementById('results-section');
     const filesEl = document.getElementById('files');
+    const statPages = document.getElementById('stat-pages');
+    const statCards = document.getElementById('stat-cards');
+    const resultsSummary = document.getElementById('results-summary');
 
     let pollInterval = null;
     let progressTicker = null;
     let activeJobId = null;
     let elapsedSec = 0;
+    let targetPagesForJob = 30;
     let lastJobFromStorage = null;
+    let isResume = false;
     try { lastJobFromStorage = localStorage.getItem('fbads:lastJobId'); } catch {}
 
     pagesInput.addEventListener('input', () => pagesLabel.textContent = pagesInput.value);
@@ -216,11 +229,17 @@
     function startProgressTicker(targetPages) {
       if (progressTicker) clearInterval(progressTicker);
       elapsedSec = 0;
+      // Real progress will overwrite this whenever the server reports pages_loaded.
+      // The ticker is just a fallback so the bar doesn't sit at 0% if the server
+      // is slow to report the first update.
       progressTicker = setInterval(() => {
         elapsedSec += 1;
-        const pct = Math.min(95, (elapsedSec / Math.max(targetPages * 4, 10)) * 100);
-        progressBar.style.width = pct + '%';
-      }, 1000);
+        // Don't move the bar past 10% with just the ticker — wait for real data
+        const cur = parseFloat(progressBar.style.width || '0');
+        if (cur < 10) {
+          progressBar.style.width = Math.min(10, cur + 1) + '%';
+        }
+      }, 1500);
     }
 
     function renderLog(logs) {
@@ -230,7 +249,7 @@
     }
 
     function prettyFile(name) {
-      if (name.endsWith('.png')) return { label: 'Full-page Screenshot', icon: '🖼️' };
+      if (name.endsWith('.png')) return { label: 'Full-page Screenshot (high-DPI)', icon: '🖼️' };
       if (name.endsWith('.html')) return { label: 'Full HTML', icon: '📄' };
       if (name.endsWith('.json')) return { label: 'Extracted JSON', icon: '🧾' };
       if (name.endsWith('.txt')) return { label: 'Run log', icon: '📜' };
@@ -258,11 +277,23 @@
       }).join('');
     }
 
+    function updateProgressStats(data) {
+      // Real progress from the server
+      if (typeof data.pages_loaded === 'number') {
+        const target = targetPagesForJob || 30;
+        statPages.textContent = `${data.pages_loaded} / ${target}`;
+        const pct = Math.min(100, (data.pages_loaded / target) * 100);
+        if (pct > parseFloat(progressBar.style.width || '0') || pct === 100) {
+          progressBar.style.width = pct + '%';
+        }
+      }
+      if (typeof data.total_cards === 'number') {
+        statCards.textContent = data.total_cards.toLocaleString();
+      }
+    }
+
     async function handleJobData(jobId, data) {
       if (data.error) {
-        // Server doesn't know about this job. Most likely cause: cold restart
-        // on the free Render tier wiped the in-memory state, or the worker
-        // died before finishing. Show this clearly and let the user retry.
         clearPolling();
         progressBar.style.width = '0%';
         setPill('Lost on server', 'err');
@@ -278,12 +309,16 @@
       renderLog(data.logs || []);
       if (data.last_log) progressText.textContent = data.last_log;
       if (data.files) renderFiles(jobId, data.files);
+      updateProgressStats(data);
 
       if (data.status === 'completed') {
         clearPolling();
         progressBar.style.width = '100%';
         setPill('Completed', 'ok');
         progressText.textContent = 'Done! Files are ready below.';
+        const cards = data.total_cards != null ? data.total_cards.toLocaleString() : '?';
+        const pages = data.pages_loaded != null ? data.pages_loaded : '?';
+        resultsSummary.textContent = `Loaded ${pages} page-equivalents · ${cards} cards extracted · screenshot is 2× DPI.`;
         resultsSection.classList.remove('hidden');
         renderFiles(jobId, data.files || []);
         setUIIdle();
@@ -301,15 +336,18 @@
       }
     }
 
-    async function pollJob(jobId, targetPages) {
+    async function pollJob(jobId, targetPages, resume) {
       activeJobId = jobId;
+      targetPagesForJob = targetPages;
       try { localStorage.setItem('fbads:lastJobId', jobId); } catch {}
       jobIdDisplay.textContent = `job: ${jobId}`;
-      setPill('Running', '');
-      startProgressTicker(targetPages);
+      setPill(resume ? 'Resuming' : 'Running', '');
+      statPages.textContent = `0 / ${targetPages}`;
+      statCards.textContent = '0';
+      if (!resume) startProgressTicker(targetPages);
 
       const tick = async () => {
-        if (activeJobId !== jobId) return; // a newer job took over
+        if (activeJobId !== jobId) return;
         try {
           const res = await fetch(`/api/job/${jobId}`);
           const data = await res.json();
@@ -318,7 +356,6 @@
           console.error('poll error', err);
         }
       };
-      // Immediate first poll
       tick();
       pollInterval = setInterval(tick, 1500);
     }
@@ -334,7 +371,7 @@
       submitBtn.classList.add('opacity-50', 'cursor-not-allowed');
       progressSection.classList.remove('hidden');
       resultsSection.classList.add('hidden');
-      progressBar.style.width = '5%';
+      progressBar.style.width = '0%';
       progressText.textContent = 'Submitting…';
       logBox.textContent = '';
       filesEl.innerHTML = '';
@@ -354,7 +391,7 @@
           setUIIdle();
           return;
         }
-        pollJob(data.job_id, pages);
+        pollJob(data.job_id, pages, false);
       } catch (err) {
         setPill('Error', 'err');
         progressText.textContent = 'Network error: ' + err.message;
@@ -368,10 +405,7 @@
       resultsSection.classList.add('hidden');
       setPill('Resuming…', '');
       progressText.textContent = 'Checking the server for the previous job…';
-      // Start a poll loop that will self-terminate on terminal state
-      pollJob(lastJobFromStorage, 30);
-      // Override the ticker so the bar doesn't slide on resume
-      if (progressTicker) { clearInterval(progressTicker); progressTicker = null; }
+      pollJob(lastJobFromStorage, 30, true);
     }
   </script>
 </body>
